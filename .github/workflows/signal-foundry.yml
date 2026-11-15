@@ -1,0 +1,53 @@
+name: Signal Foundry
+
+on:
+  push:
+    paths: ['SignalFoundry/**', '.github/workflows/signal-foundry.yml']
+  pull_request:
+    paths: ['SignalFoundry/**', '.github/workflows/signal-foundry.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-source-and-plugin:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: SignalFoundry
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install verified Godot 4.6.3
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'godot.zip'
+          Invoke-WebRequest 'https://github.com/godotengine/godot-builds/releases/download/4.6.3-stable/Godot_v4.6.3-stable_win64.exe.zip' -OutFile $zip
+          $expected = 'd44ea7ef5bab754cacd49d581b6062836b2eea12a82e1d183aebfad9cd8c7db2bd82513337bd657d6d2d5c04d46239c0570b029faf1343e81e8a2fa7b85dd83b'
+          if ((Get-FileHash $zip -Algorithm SHA512).Hash.ToLower() -ne $expected) { throw 'Godot SHA512 mismatch' }
+          $tools = Join-Path $env:RUNNER_TEMP 'godot'
+          Expand-Archive $zip -DestinationPath $tools
+          "GODOT=$tools/Godot_v4.6.3-stable_win64_console.exe" >> $env:GITHUB_ENV
+      - name: Import, model tests, and source generation
+        run: |
+          & $env:GODOT --headless --path . --editor --import
+          if ($LASTEXITCODE -ne 0) { throw 'Import failed' }
+          $export = Join-Path $env:RUNNER_TEMP 'foundry-generated'
+          & $env:GODOT --headless --path . --script res://tests/test_runner.gd -- "--export-to=$export"
+          if ($LASTEXITCODE -ne 0) { throw 'Model/export tests failed' }
+          & $env:GODOT --headless --path . --script res://tests/ui_smoke.gd
+          if ($LASTEXITCODE -ne 0) { throw 'UI smoke failed' }
+          "GENERATED=$export" >> $env:GITHUB_ENV
+      - name: Compile generated Windows VST3 and test DSP
+        run: |
+          & "$env:GENERATED/build-windows.ps1"
+          if ($LASTEXITCODE -ne 0) { throw 'Generated plugin build failed' }
+      - name: Retain development plugin and generated source
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-windows-vst3-development
+          path: |
+            ${{ env.GENERATED }}/build/FoundryPlugin_artefacts/Release/VST3/
+            ${{ env.GENERATED }}/Source/
+            ${{ env.GENERATED }}/project.signal.json
